@@ -62,14 +62,8 @@ MPU9255Sensor imu(&Wire);
 // UART
 UARTProtocol uartProto(&Serial, LED_PIN);
 
-// *** FİZİKSEL AYARLAR ***
-#define WHEEL_CIRCUMFERENCE  0.50f
-
-// --- KONUM TAKİP DEĞİŞKENLERİ ---
-float podPosition = 0.0;          // Aracın anlık konumu (Metre)
-float lastEncoderPosRev = 0.0;    // Son döngüdeki encoder turu
-float lastStripPos = 0.0;         // Son şeridin görüldüğü konum (Metre)
-bool isFirstStripDetected = false; // İlk şerit (11m) görüldü mü?
+float podPosition = 0.0;          // Sadece Optik ile artan konum
+unsigned long lastStripTime = 0;  // Son şeridin görülme zamanı (Burst tespiti için)
 
 // ============================================================================
 // INTERRUPT SERVISLERI (ISR)
@@ -83,61 +77,48 @@ void encoderISR() { encoder.update(); }
 // NAVİGASYON ALGORİTMASI (SENİN YAZDIĞIN KOD - AYNI KALDI)
 // ============================================================================
 void updateNavigation() {
-    // 1. ADIM: ENCODER İLE MESAFE EKLE (Dead Reckoning)
-    float currentRev = encoder.getRevolutions();
-    float deltaRev = currentRev - lastEncoderPosRev;
-    
-    // Gidilen yol = Tur Farkı * Çevre
-    float deltaDist = deltaRev * WHEEL_CIRCUMFERENCE;
-    
-    // Hareket varsa konuma ekle
-    if (abs(deltaDist) > 0.001) {
-        podPosition += deltaDist; 
-        lastEncoderPosRev = currentRev;
-    }
-    if (podPosition < 0) podPosition = 0; // Eksiye düşmeyi engelle
-
-    // 2. ADIM: OPTİK SENSÖR İLE KONUMU DOĞRULA (Calibration)
     opticalSensors.update();
 
+    // Sağ veya Sol sensörden herhangi biri şerit görürse:
     if (e3fa1.hasNewDetection() || e3fa2.hasNewDetection()) {
         
-        // Son şeritten beri ne kadar gittik? (Encoder verisiyle)
-        float distSinceLast = podPosition - lastStripPos;
-        
-        // --- SENARYO A: İLK ŞERİT (START - 11m) ---
-        if (!isFirstStripDetected) {
+        unsigned long currentTime = millis();
+        unsigned long timeDiff = currentTime - lastStripTime;
+        lastStripTime = currentTime;
+
+        // --- KONUM HARİTALAMA MANTIĞI ---
+
+        // A) BAŞLANGIÇ (0. Metre civarı)
+        if (podPosition == 0.0) {
+            // İlk gördüğümüz şey kesinlikle 11. metredeki ilk şerittir.
             podPosition = 11.0; 
-            isFirstStripDetected = true;
-            lastStripPos = 11.0;
         }
-        
-        // --- SENARYO B: NORMAL ŞERİT (4 METRE) ---
-        else if (distSinceLast > 3.5 && distSinceLast < 4.5) {
-            float realPos = lastStripPos + 4.0;
-            podPosition = realPos;
-            lastStripPos = realPos;
+
+        // B) BURST TESPİTİ (Hızlı arka arkaya gelen şeritler)
+        // Eğer bir önceki şeritten sonra çok kısa süre geçtiyse (Örn: < 200ms)
+        // Ve zaten kritik bölgelere (86m veya 160m) yakınsak
+        // (Not: Sabit hız olmadığı için timeDiff risklidir, ancak çok sık şeritleri (5cm) 
+        //  4 metrelik boşluktan ayırmak için genelde bariz bir fark olur)
+        else if (timeDiff < 300) { 
+            // Bu bir "İşaretçi Şerit" (5cm aralıklı)
+            // Konuma sadece 5cm ekle
+            podPosition += 0.05; 
+            
+            // Eğer konum 86m civarındaysa tam 86'ya sabitle (Kalibrasyon)
+            if (podPosition > 85.0 && podPosition < 87.0) podPosition = 86.0;
+            
+            // Eğer konum 160m civarındaysa tam 160'a sabitle
+            if (podPosition > 159.0 && podPosition < 161.0) podPosition = 160.0;
         }
-        
-        // --- SENARYO C: BURST BÖLGESİ (86m ve 160m) ---
-        else if (distSinceLast < 0.5) {
-            if (podPosition > 80.0 && podPosition < 90.0) {
-                if (abs(podPosition - 86.0) > 1.0) { 
-                    podPosition = 86.0; 
-                }
-            }
-            else if (podPosition > 155.0 && podPosition < 165.0) {
-                if (abs(podPosition - 160.0) > 1.0) {
-                    podPosition = 160.0;
-                }
-            }
-            lastStripPos = podPosition; 
+        // C) NORMAL SEYİR (4 Metre Aralıklar)
+        else {
+            // Aradan uzun zaman geçtiyse bu bir sonraki 4m şerididir.
+            podPosition += 4.0;
         }
-    }
 }
 
 // ============================================================================
-// YENİ JSON GÖNDERME FONKSİYONU (Polaris/Interface Uyumu İçin)
+// JSON GÖNDERME FONKSİYONU
 // ============================================================================
 /**
  * @brief Tüm verileri toplar ve Raspberry Pi'nin beklediği JSON formatında basar.
