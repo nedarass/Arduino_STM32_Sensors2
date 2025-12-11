@@ -15,6 +15,9 @@
 #include "omron_e6b2_encoder.h"
 #include "mpu9255_sensor.h"
 
+// Tekerlek Çevresi (Metre cinsinden). Hız hesabı için gerekli.
+#define WHEEL_CIRCUMFERENCE  0.50f
+
 // ============================================================================
 // PIN TANIMLARI
 // ============================================================================
@@ -63,6 +66,7 @@ MPU9255Sensor imu(&Wire);
 UARTProtocol uartProto(&Serial, LED_PIN);
 
 float podPosition = 0.0;          // Sadece Optik ile artan konum
+int stripCounter = 0;             // Kaçıncı şeritteyiz? (Sayaç)
 unsigned long lastStripTime = 0;  // Son şeridin görülme zamanı (Burst tespiti için)
 
 // ============================================================================
@@ -82,39 +86,48 @@ void updateNavigation() {
     // Sağ veya Sol sensörden herhangi biri şerit görürse:
     if (e3fa1.hasNewDetection() || e3fa2.hasNewDetection()) {
         
-        unsigned long currentTime = millis();
-        unsigned long timeDiff = currentTime - lastStripTime;
-        lastStripTime = currentTime;
+       // --- DEBOUNCE (Çift saymayı önle) ---
+        // Aynı şeridi 100ms içinde tekrar sayma
+        if (millis() - lastStripTime < 100) return;
+        lastStripTime = millis();
 
-        // --- KONUM HARİTALAMA MANTIĞI ---
+        // Sayacı Artır
+        stripCounter++;
 
-        // A) BAŞLANGIÇ (0. Metre civarı)
-        if (podPosition == 0.0) {
-            // İlk gördüğümüz şey kesinlikle 11. metredeki ilk şerittir.
-            podPosition = 11.0; 
+        // --- HARİTA MANTIĞI (KURALLARA GÖRE) ---
+        
+        // 1. BÖLGE: BAŞLANGIÇ (1. - 19. Şeritler)
+        // 11. metreden başlar, 4'er metre gider.
+        if (stripCounter <= 19) {
+            // Formül: Başlangıç + (Sayı - 1) * Aralık
+            podPosition = 11.0 + (stripCounter - 1) * 4.0;
         }
-
-        // B) BURST TESPİTİ (Hızlı arka arkaya gelen şeritler)
-        // Eğer bir önceki şeritten sonra çok kısa süre geçtiyse (Örn: < 200ms)
-        // Ve zaten kritik bölgelere (86m veya 160m) yakınsak
-        // (Not: Sabit hız olmadığı için timeDiff risklidir, ancak çok sık şeritleri (5cm) 
-        //  4 metrelik boşluktan ayırmak için genelde bariz bir fark olur)
-        else if (timeDiff < 300) { 
-            // Bu bir "İşaretçi Şerit" (5cm aralıklı)
-            // Konuma sadece 5cm ekle
-            podPosition += 0.05; 
-            
-            // Eğer konum 86m civarındaysa tam 86'ya sabitle (Kalibrasyon)
-            if (podPosition > 85.0 && podPosition < 87.0) podPosition = 86.0;
-            
-            // Eğer konum 160m civarındaysa tam 160'a sabitle
-            if (podPosition > 159.0 && podPosition < 161.0) podPosition = 160.0;
+        
+        // 2. BÖLGE: SON 100M İŞARETÇİSİ (20. - 39. Şeritler) [Burst]
+        // 86. metreden başlar, çok sık aralıkla (örn: 0.2m) gider.
+        else if (stripCounter <= 39) {
+            // Bu bölge 4 metre uzunluğunda ve 20 parça. 4m / 20 = 0.2m aralık.
+            podPosition = 86.0 + (stripCounter - 20) * 0.2;
         }
-        // C) NORMAL SEYİR (4 Metre Aralıklar)
+        
+        // 3. BÖLGE: ORTA KISIM (40. - 56. Şeritler)
+        // İşaretçiden sonraki ilk normal şerit 94. metrede başlar.
+        else if (stripCounter <= 56) {
+            podPosition = 94.0 + (stripCounter - 40) * 4.0;
+        }
+        
+        // 4. BÖLGE: SON 48M İŞARETÇİSİ (57. - 66. Şeritler) [Burst]
+        // 160. metreden başlar. 4 metre uzunluğunda, 10 parça. 4m / 10 = 0.4m aralık.
+        else if (stripCounter <= 66) {
+            podPosition = 160.0 + (stripCounter - 57) * 0.4;
+        }
+        
+        // 5. BÖLGE: FİNAL (67. ve sonrası)
+        // 168. metreden başlar, 4'er metre devam eder.
         else {
-            // Aradan uzun zaman geçtiyse bu bir sonraki 4m şerididir.
-            podPosition += 4.0;
+            podPosition = 168.0 + (stripCounter - 67) * 4.0;
         }
+    } 
 }
 
 // ============================================================================
