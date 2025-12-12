@@ -193,7 +193,6 @@ void sendJsonData() {
     Serial.print(",");
 
     Serial.print("\"battery_voltage\":0");
-    Serial.print(",");
 
     Serial.print("}");
 
